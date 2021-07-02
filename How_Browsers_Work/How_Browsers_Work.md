@@ -271,9 +271,100 @@ clientWidth() - paddingLeft() - paddingRight()
 レイアウト中に改行が必要だと判断した場合、レイアウトを中断して親に改行の必要があることを伝える。親は別の renderer を作成して layout メソッドを呼び出す。
 
 ## Painting
+描画のステージでは render tree を走査し、paint() メソッドを呼び出してコンテンツを画面に表示する。描画は UI infrastructure component を使用する。
+レイアウトと同様に、 global / incremental がある。
+変更された renderer は画面上で自身の矩形を無効にすることで、OS がその領域を dirty と見なして paint イベントを生成する。
+Chrome では renderer がメインプロセスと別プロセスにあるため複雑な処理となる。
+
+描画の（実際には stacking contexts に要素がスタックされる）順序は次の通り。
+1. Background color
+2. Background image
+3. Border
+4. Children
+5. Outline
+
+Firefox では render tree から描画する矩形の表示リストを作成する。この際、他の不透明な要素に隠れる要素などをリストに追加しないことで最適化を図っている。
+
+WebKit では再描画前に古い矩形をビットマップとして保存し、差分だけを描画する方法をとっている。
 
 ## Dynamic changes
+ブラウザは変更に対して最小限の操作を実行しようとする。要素の色が変わった場合は対象の要素の再描画を、要素の位置が変わった場合は要素とその子や兄弟のレイアウトと再描画を、DOM が追加された場合はノードのレイアウトと再描画が行われる。html 要素のフォントサイズを変えるなど、大きな変更を加えた場合はキャッシュが無効になり、全体の再レイアウトと再描画が行われる。
+
 
 ## The rendering engine’s threads
+レンダリングエンジンはシングルスレッドである。ネットワーク処理以外のすべての処理がシングルスレッドで行われる。Firefox, Safari では、ブラウザのメインスレッドで、Chrome ではタブプロセスのメインスレッドが用いられる。ネットワーク処理は通常 2~6 接続の並列スレッドで実施される。
+
+ブラウザのメインスレッドはイベントループであり、プロセスを維持し続けるための無限ループである。レイアウトや描画イベントを処理するために待機している。
 
 ## CSS2 visual model
+キャンバスは “the space where the formatting structure is rendered” と記載れており、ブラウザがコンテンツを描画するための場所である。キャンバスの大きさは無限大だが、viewport の寸法に基づいて初期値を決定する。
+キャンバス自身は、別のキャンバスに含まれている場合は透明、それ以外はブラウザで定義された色になる。
+
+### CSS Box model
+Box はコンテンツ領域と、周囲の margin / padding /border（省略可能）がある。
+
+![](How_Browsers_Work/649BB7F2-3909-4249-8555-8252758B899C.png)
+
+各ノードは 0..n の個のボックスを生成する。すべての要素は `display` プロパティを持つ。
+Box のデフォルトは `inline` だがブラウザのスタイルシートで別の値が設定されていることがある。例として、div のデフォルトは `block` である。
+各要素のデフォルト値は[こちら](https://www.w3.org/TR/CSS2/sample.html)
+
+Positioning scheme（配置方法）は三種類ある。
+1. Normal: the object is positioned according to its place in the document. This means its place in the render tree is like its place in the DOM tree and laid out according to its box type and dimensions
+2. Float: the object is first laid out like normal flow, then moved as far left or right as possible
+3. Absolute: the object is put in the render tree in a different place than in the DOM tree
+
+配置方法は `position` プロパティと `float` 属性で設定する。
+* `static` と `relative` は Normal
+* `absolute` と `fixed` は Absolute
+
+`static` 配置の場合は位置は定義されず、デフォルトの配置が使用される。それ以外の方法では、作成者が top / bottom / left / right で位置を指定する。
+ボックスのレイアウトは次の要因で決定する。
+* ボックスの種類
+* ボックスの寸法
+* 配置方法
+* 外部の情報（画像サイズや画面のサイズなど）
+
+### ボックスの種類
+**Block**
+ブラウザ上に、独自の矩形を持ったブロック
+
+![](How_Browsers_Work/45DB1327-91D1-47FB-9B5B-7DED7AF75BC8.png)
+
+**Inline**
+独自のブロックは持たずに、包括するブロックの内側に配置する。
+
+![](How_Browsers_Work/B0D5A78F-82FC-4BCF-B3F2-7AB485C7F903.png)
+
+Block は垂直に、Inline は水平に配列される。
+
+![](How_Browsers_Work/3E9133B7-712F-4C89-8BF7-60671F925CF1.png)
+
+Inline box は line / line boxes の内側に置かれる。line は一番高いボックスと同じか、またはそれより高くなることもある。
+
+![](How_Browsers_Work/B433D12E-97CC-468B-9E88-9562AEB8FB09.png)
+
+### 配置
+**Relative**
+通常通りの配置。
+
+![](How_Browsers_Work/74FCD051-8113-47AF-B918-06BF8BD81132.png)
+
+**Floats**
+他のボックスが回り込むのが特徴。
+
+![](How_Browsers_Work/09321DB6-C8E4-42CA-8928-5918890CCA13.png)
+
+**Absolute and fixed**
+通常のフローに関係なく厳密に定義される。寸法はコンテナに対して相対的になる。fixed の場合はコンテナは viewport である。
+
+![](How_Browsers_Work/D6913A30-3492-451C-AAF9-C785D763F9BA.png)
+
+fixed ではドキュメントがスクロールしても移動しない。
+
+### レイヤの表現
+z-index プロパティで表される三次元の要素。ボックスは stacking contexts に分けられ、後ろの要素から先に描画される。オーバーラップする場合、前面の要素が先に描画された要素を隠す。スタックの順序は z-index プロパティに従う。
+
+![](How_Browsers_Work/94EBAB89-7DCC-4FD4-997E-DF11C01D079A.png)
+
+赤い div は緑の div よりも先にあるため、通常のフローより前に描画されるが z-index の値が大きいため前方に表示される。
